@@ -8,6 +8,13 @@
 set -e
 
 # Parse arguments
+# Colors for output (defined early so they are available during argument parsing)
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
 EXECUTE_ALL="false"
 REPO_PATH="$PWD"
 
@@ -56,13 +63,6 @@ TMP_NAME="${REPO_NAME}-tmp"
 TMP_DIR=".tmp-local"
 LOCAL_REF_DIR=".local-ref"  # Final name for local files directory
 WORKTREES_DIR="worktrees"
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
 
 print_step() {
     echo -e "${BLUE}--- Step $1: $2 ---${NC}"
@@ -123,6 +123,34 @@ echo -e "Repo: $REPO_PATH"
 echo ""
 
 check_prerequisites
+
+# ============================================================================
+# Determine core branch name
+# ============================================================================
+if [ "$EXECUTE_ALL" = "true" ]; then
+    CORE_BRANCH="main"
+    print_warning "Assuming core branch is 'main' (non-interactive mode)"
+else
+    echo "What is the primary branch of this repository?"
+    echo "  1) main"
+    echo "  2) master"
+    echo "  3) other"
+    read -p "Select [1/2/3]: " -n 1 -r
+    echo
+    case $REPLY in
+        1) CORE_BRANCH="main" ;;
+        2) CORE_BRANCH="master" ;;
+        3)
+            read -p "Enter branch name: " CORE_BRANCH
+            if [ -z "$CORE_BRANCH" ]; then
+                echo -e "${RED}Error: Branch name cannot be empty${NC}"
+                exit 1
+            fi
+            ;;
+        *) CORE_BRANCH="main"; echo "Defaulting to 'main'" ;;
+    esac
+    print_success "Core branch: $CORE_BRANCH"
+fi
 
 # ============================================================================
 # WARNING: Check for uncommitted/pushed changes
@@ -319,18 +347,18 @@ fi
 # ============================================================================
 # STEP 6: Create worktrees directory and main worktree
 # ============================================================================
-print_step 6 "Create worktrees directory with main branch"
+print_step 6 "Create worktrees directory with $CORE_BRANCH branch"
 
 if skip_step "Skip worktrees setup?"; then
     echo "Skipping worktrees setup"
 else
     cd "$REPO_DIR/$BARE_REPO_NAME"
     mkdir -p "$WORKTREES_DIR"
-    git worktree add "$WORKTREES_DIR/main" main
-    # Set upstream tracking for main branch
-    cd "$WORKTREES_DIR/main" && git branch --set-upstream-to=origin/main main
+    git worktree add "$WORKTREES_DIR/$CORE_BRANCH" "$CORE_BRANCH"
+    # Set upstream tracking for core branch
+    cd "$WORKTREES_DIR/$CORE_BRANCH" && git branch --set-upstream-to=origin/$CORE_BRANCH "$CORE_BRANCH"
     cd "$REPO_DIR/$BARE_REPO_NAME"
-    print_success "Main worktree created: $WORKTREES_DIR/main"
+    print_success "Core worktree created: $WORKTREES_DIR/$CORE_BRANCH"
 fi
 
 # ============================================================================
@@ -342,8 +370,8 @@ if skip_step "Skip copying local files to worktree?"; then
     echo "Skipping local files copy"
 else
     if [ -d "$REPO_DIR/$BARE_REPO_NAME/$TMP_DIR" ] && [ "$(ls -A "$REPO_DIR/$BARE_REPO_NAME/$TMP_DIR" 2>/dev/null)" ]; then
-        echo "Copying local files to $WORKTREES_DIR/main..."
-        cp -r "$REPO_DIR/$BARE_REPO_NAME/$TMP_DIR"/. "$REPO_DIR/$BARE_REPO_NAME/$WORKTREES_DIR/main/" 2>/dev/null || true
+        echo "Copying local files to $WORKTREES_DIR/$CORE_BRANCH..."
+        cp -r "$REPO_DIR/$BARE_REPO_NAME/$TMP_DIR"/. "$REPO_DIR/$BARE_REPO_NAME/$WORKTREES_DIR/$CORE_BRANCH/" 2>/dev/null || true
         print_success "Local files copied to worktree"
     else
         echo "No local files to copy"
@@ -442,50 +470,52 @@ else
     fi
     
     if [ -n "$BARE_REPO_PATH" ]; then
-        cat > "$BARE_REPO_PATH/WORKTREES.md" << 'WORKTREES_EOF'
+        cat > "$BARE_REPO_PATH/WORKTREES.md" << WORKTREES_EOF
 # Worktrees Guide
 
 This repository uses Git worktrees for isolated development environments.
+
+**Core branch:** \`$CORE_BRANCH\`
 
 ## What are Worktrees?
 
 Worktrees allow you to have multiple working directories from the same Git repository. Each worktree is connected to the bare repo but has its own checked-out files. This lets you:
 
 - Work on multiple branches simultaneously
-- Keep your `main` worktree clean while developing features
+- Keep your \`$CORE_BRANCH\` worktree clean while developing features
 - Avoid constantly switching branches and rebuilding
 
 ## Structure
 
-```
+\`\`\`
 repo/
 ├── .git/              ← Bare repo (shared git data)
 ├── .local-ref/        ← Local config files (copy to new worktrees)
 └── worktrees/         ← All worktrees live here
-    ├── main/          ← Main branch worktree
+    ├── $CORE_BRANCH/          ← Core branch worktree
     ├── feature-x/     ← Feature branch worktree
     └── staging/       ← Staging branch worktree
-```
+\`\`\`
 
 ## Common Commands
 
 ### Create a worktree for a NEW branch
 
-```bash
-# From the bare repo root
-git --git-dir=.git worktree add worktrees/feature-name -b feature-name
+\`\`\`bash
+# From the bare repo root (or use wt-add shortcut)
+git --git-dir=.git worktree add worktrees/feature-name -b feature-name $CORE_BRANCH
 
 # Copy local config files to the new worktree
 cp -r .local-ref/. worktrees/feature-name/
 
 # Navigate to the new worktree
 cd worktrees/feature-name
-```
+\`\`\`
 
 ### Create a worktree from an EXISTING branch
 
-```bash
-# From the bare repo root
+\`\`\`bash
+# From the bare repo root (or use wt-add-existing shortcut)
 git --git-dir=.git worktree add worktrees/staging staging
 
 # Copy local config files to the new worktree
@@ -493,17 +523,17 @@ cp -r .local-ref/. worktrees/staging/
 
 # Navigate to the new worktree
 cd worktrees/staging
-```
+\`\`\`
 
 ### List all worktrees
 
-```bash
+\`\`\`bash
 git --git-dir=.git worktree list
-```
+\`\`\`
 
 ### Remove a worktree
 
-```bash
+\`\`\`bash
 # First, navigate to the worktree and make sure it's clean
 cd worktrees/feature-name
 git status
@@ -516,130 +546,214 @@ git --git-dir=.git worktree remove worktrees/feature-name
 
 # To also delete the branch
 git --git-dir=.git branch -d feature-name
-```
+\`\`\`
 
 ### Force remove a worktree (if dirty)
 
-```bash
+\`\`\`bash
 git --git-dir=.git worktree remove --force worktrees/feature-name
-```
+\`\`\`
 
 ### Move a worktree
 
-```bash
+\`\`\`bash
 git --git-dir=.git worktree move worktrees/old-name worktrees/new-name
-```
+\`\`\`
 
 ### Prune stale worktrees
 
-```bash
+\`\`\`bash
 # If you manually deleted a worktree directory, clean up references
 git --git-dir=.git worktree prune
-```
+\`\`\`
 
 ## Workflow Example
 
-```bash
+\`\`\`bash
 # 1. Start a new feature
-git --git-dir=.git worktree add worktrees/add-login -b add-login
-cp -r .local-ref/. worktrees/add-login/
-cd worktrees/add-login
+wt-add add-login
+# (creates branch from $CORE_BRANCH, copies .local-ref, and cd's into it)
 
 # 2. Do your work...
 npm install
 npm run dev
 # ... make changes, commit, push ...
 
-# 3. When done, go back to main
-cd ../..
-
-# 4. Clean up after merge
-git --git-dir=.git worktree remove worktrees/add-login
-git --git-dir=.git branch -d add-login
-```
+# 3. Clean up after merge
+wt-remove add-login
+wt-rm-branch add-login
+\`\`\`
 
 ## Tips
 
-- Always copy `.local-ref/` to new worktrees for local config (`.env.local`, `.husky/`, etc.)
-- You can run `npm install` independently in each worktree
-- Each worktree has its own `node_modules/` and build artifacts
+- Always copy \`.local-ref/\` to new worktrees for local config (\`.env.local\`, \`.husky/\`, etc.)
+- You can run \`npm install\` independently in each worktree
+- Each worktree has its own \`node_modules/\` and build artifacts
 - Use descriptive worktree names that match your branch names
 - Clean up merged worktrees to keep things organized
 
 ## Keeping .local-ref/ Updated
 
-When you update local config files in a worktree (e.g., add a new `.env` variable), sync them back to `.local-ref/` so new worktrees get the latest:
+When you update local config files in a worktree (e.g., add a new \`.env\` variable), sync them back to \`.local-ref/\` so new worktrees get the latest:
 
-```bash
+\`\`\`bash
 # From any worktree
 wt-sync-ref
-```
+\`\`\`
 
 Or manually:
-```bash
+\`\`\`bash
 # Sync from current worktree to .local-ref/
 cp .env.local ../.local-ref/
-```
+\`\`\`
 
 ## Shell Functions (Optional)
 
-Add these to your `~/.bashrc` or `~/.zshrc` for convenience:
+Add these to your \`~/.zshrc\` for convenience:
 
-```bash
+**Required env var** (set to your core branch name):
+\`\`\`bash
+export WT_CORE_BRANCH="$CORE_BRANCH"
+\`\`\`
+
+\`\`\`bash
 # Helper: Get bare repo root path
 _wt_root() {
-  local git_dir=$(git rev-parse --git-common-dir 2>/dev/null)
-  if [ "$git_dir" = ".git" ]; then
+  local git_dir=\$(git rev-parse --git-common-dir 2>/dev/null)
+  if [ -z "\$git_dir" ]; then
+    echo "Error: not inside a git repository" >&2
+    return 1
+  fi
+  if [ "\$git_dir" = ".git" ]; then
     pwd
   else
-    echo "$git_dir" | sed 's|/\.git$||'
+    echo "\$git_dir" | sed 's|/\\.git\$||'
   fi
 }
 
 # Worktree shortcuts (run from bare repo root or any worktree)
-wt-list() { git --git-dir=$(_wt_root)/.git worktree list; }
-wt-add() { local r=$(_wt_root); git --git-dir=$r/.git worktree add $r/worktrees/$1 -b $1 && [ -d "$r/.local-ref" ] && cp -r $r/.local-ref/. $r/worktrees/$1/ || true; }
-wt-add-existing() { local r=$(_wt_root); git --git-dir=$r/.git worktree add $r/worktrees/$1 $1 && [ -d "$r/.local-ref" ] && cp -r $r/.local-ref/. $r/worktrees/$1/ || true && cd $r/worktrees/$1 && git branch --set-upstream-to=origin/$1 $1 && cd -; }
-wt-remove() { git --git-dir=$(_wt_root)/.git worktree remove $(_wt_root)/worktrees/$1; }
-wt-rm-branch() { git --git-dir=$(_wt_root)/.git branch -d $1; }
-wt-cd() { cd $(_wt_root)/worktrees/$1; }
-wt-root() { cd $(_wt_root); }
+wt-list() { git --git-dir="\$(_wt_root)/.git" worktree list; }
+wt-add() {
+  if [ -z "\$1" ]; then
+    echo "Usage: wt-add <branch-name>"
+    return 1
+  fi
+  local r=\$(_wt_root)
+  local core=\${WT_CORE_BRANCH:-main}
+  if ! git --git-dir="\$r/.git" worktree add "\$r/worktrees/\$1" -b "\$1" "\$core"; then
+    echo "Failed to create worktree '\$1'"
+    return 1
+  fi
+  [ -d "\$r/.local-ref" ] && cp -r "\$r/.local-ref/." "\$r/worktrees/\$1/"
+  cd "\$r/worktrees/\$1"
+}
+wt-add-existing() {
+  if [ -z "\$1" ]; then
+    echo "Usage: wt-add-existing <branch-name>"
+    return 1
+  fi
+  local r=\$(_wt_root)
+  if ! git --git-dir="\$r/.git" worktree add "\$r/worktrees/\$1" "\$1"; then
+    echo "Failed to create worktree '\$1'"
+    return 1
+  fi
+  [ -d "\$r/.local-ref" ] && cp -r "\$r/.local-ref/." "\$r/worktrees/\$1/"
+  cd "\$r/worktrees/\$1" && git branch --set-upstream-to="origin/\$1" "\$1"
+}
+wt-remove() {
+  local force=0
+  local name=""
+  for arg in "\$@"; do
+    case "\$arg" in
+      --force|-f) force=1 ;;
+      *) name="\$arg" ;;
+    esac
+  done
+  if [ -z "\$name" ]; then
+    echo "Usage: wt-remove [--force] <worktree-name>"
+    return 1
+  fi
+  local r=\$(_wt_root)
+  local wt_path="\$r/worktrees/\$name"
+  if [ ! -d "\$wt_path" ]; then
+    echo "Worktree '\$name' not found at \$wt_path"
+    return 1
+  fi
+  if [ "\$force" -eq 0 ]; then
+    echo -n "Sync local files from '\$name' to .local-ref before removing? (y/n): "
+    read -k 1 REPLY
+    echo
+    if [[ \$REPLY =~ ^[Yy]\$ ]]; then
+      (cd "\$wt_path" && wt-sync-ref)
+    fi
+  fi
+  # If we are inside the worktree being removed, move to root first
+  case "\$(pwd -P)/" in
+    "\$(cd "\$wt_path" && pwd -P)/"*)
+      cd "\$r"
+      ;;
+  esac
+  if [ "\$force" -eq 1 ]; then
+    git --git-dir="\$r/.git" worktree remove --force "\$wt_path"
+  else
+    git --git-dir="\$r/.git" worktree remove "\$wt_path"
+  fi
+}
+wt-rm-branch() {
+  if [ -z "\$1" ]; then
+    echo "Usage: wt-rm-branch <branch-name>"
+    return 1
+  fi
+  git --git-dir="\$(_wt_root)/.git" branch -d "\$1"
+}
+wt-cd() {
+  if [ -z "\$1" ]; then
+    echo "Usage: wt-cd <worktree-name>"
+    return 1
+  fi
+  cd "\$(_wt_root)/worktrees/\$1"
+}
+wt-root() { cd "\$(_wt_root)"; }
 
 # Sync local files from current worktree back to .local-ref/
 wt-sync-ref() {
-  local bare_root=$(_wt_root)
-  local ref_dir="$bare_root/.local-ref"
-  if [ ! -d "$ref_dir" ]; then
-    echo "No .local-ref/ directory found"
-    return 1
-  fi
+  local bare_root=\$(_wt_root)
+  local ref_dir="\$bare_root/.local-ref"
   local exclude_patterns=("node_modules/" ".next/" "dist/" "build/" ".tsbuildinfo" "next-env.d.ts" ".cache/" "coverage/" ".vercel/" ".DS_Store")
-  git ls-files --others --ignored --exclude-standard | while read -r file; do
+  local file_list=\$(git ls-files --others --ignored --exclude-standard 2>/dev/null)
+  if [ -z "\$file_list" ]; then
+    echo "No ignored files found to sync"
+    return 0
+  fi
+  echo "\$file_list" | while read -r file; do
     local skip=0
-    for pattern in "${exclude_patterns[@]}"; do
-      [[ "$file" == *"$pattern"* ]] && skip=1 && break
+    for pattern in "\${exclude_patterns[@]}"; do
+      [[ "\$file" == *"\$pattern"* ]] && skip=1 && break
     done
-    if [ "$skip" -eq 0 ] && [ -e "$file" ]; then
-      mkdir -p "$ref_dir/$(dirname "$file")"
-      cp -r "$file" "$ref_dir/$file"
-      echo "Synced: $file"
+    if [ "\$skip" -eq 0 ] && [ -e "\$file" ]; then
+      mkdir -p "\$ref_dir/\$(dirname "\$file")"
+      cp -r "\$file" "\$ref_dir/\$file"
+      echo "Synced: \$file"
     fi
   done
   echo "Sync complete"
 }
-```
+\`\`\`
 
 Usage:
-```bash
+\`\`\`bash
 wt-list                    # List all worktrees
-wt-add feature-x           # Create new branch and worktree + copy local files
-wt-add-existing staging    # Create worktree from existing branch + copy local files
+wt-add feature-x           # Create branch from $CORE_BRANCH, copy local files, cd into worktree
+wt-add-existing staging    # Create worktree from existing branch, copy local files, cd into it
 wt-sync-ref                # Sync local files from current worktree to .local-ref/
-wt-remove feature-x        # Remove a worktree
+wt-remove feature-x        # Remove worktree (offers to sync local files first; safe from inside)
+wt-remove --force feature-x # Remove worktree without prompts (force-removes dirty worktrees)
 wt-rm-branch feature-x     # Delete a branch (after removing worktree)
-wt-cd main                 # Go to specific worktree
+wt-cd $CORE_BRANCH                 # Go to specific worktree
 wt-root                    # Go to bare repo root
-```
+\`\`\`
+
+**Environment:** Set \`WT_CORE_BRANCH\` to your core branch (defaults to \`main\`).
 
 Note: Functions work from bare repo root or any worktree.
 WORKTREES_EOF
@@ -656,14 +770,14 @@ echo "  $REPO_DIR/$REPO_NAME/"
 echo "    ├── .git/              ← Bare repo"
 echo "    ├── .local-ref/        ← Local files (.env.local, etc.)"
 echo "    ├── worktrees/         ← Worktrees"
-echo "    │   └── main/          ← Main branch worktree (with working files)"
+echo "    │   └── $CORE_BRANCH/          ← Core branch worktree (with working files)"
 echo "    └── WORKTREES.md       ← Guide for using worktrees"
 echo ""
+echo "Core branch: $CORE_BRANCH"
 echo "Backup: $REPO_DIR/$BACKUP_NAME"
 echo ""
 echo "To add new worktrees:"
 echo "  cd $REPO_DIR/$REPO_NAME"
-echo "  git --git-dir=.git worktree add worktrees/your-branch-name -b your-branch-name"
-echo "  cp -r .local-ref/. worktrees/your-branch-name/"
+echo "  wt-add your-branch-name   # branches from $CORE_BRANCH, copies .local-ref, cd's in"
 echo ""
 echo "See WORKTREES.md for detailed instructions."
