@@ -649,7 +649,7 @@ wt-add() {
     echo "Failed to create worktree '\$1'"
     return 1
   fi
-  [ -d "\$r/.local-ref" ] && cp -r "\$r/.local-ref/." "\$r/worktrees/\$1/"
+  [ -d "\$r/.local-ref" ] && rsync -a --exclude='_archive/' "\$r/.local-ref/" "\$r/worktrees/\$1/"
   cd "\$r/worktrees/\$1"
 }
 wt-add-existing() {
@@ -664,7 +664,7 @@ wt-add-existing() {
     echo "Failed to create worktree '\$1'"
     return 1
   fi
-  [ -d "\$r/.local-ref" ] && cp -r "\$r/.local-ref/." "\$r/worktrees/\$1/"
+  [ -d "\$r/.local-ref" ] && rsync -a --exclude='_archive/' "\$r/.local-ref/" "\$r/worktrees/\$1/"
   cd "\$r/worktrees/\$1" && git branch --set-upstream-to="origin/\$1" "\$1"
 }
 wt-remove() {
@@ -746,6 +746,7 @@ _wt_sync_excludes=(
 wt-sync-to-ref() {
   local bare_root=\$(_wt_root)
   local ref_dir="\$bare_root/.local-ref"
+  local archive_dir="\$ref_dir/_archive"
   local file_list=\$(git ls-files --others --ignored --exclude-standard 2>/dev/null)
   if [ -z "\$file_list" ]; then
     echo "No ignored files found to sync"
@@ -755,7 +756,10 @@ wt-sync-to-ref() {
     mkdir -p "\$ref_dir"
     echo "Created .local-ref/ at \$bare_root"
   fi
-  echo "\$file_list" | while read -r file; do
+
+  # Sync files from worktree to .local-ref
+  local synced_files=()
+  while IFS= read -r file; do
     local skip=0
     for pattern in "\${_wt_sync_excludes[@]}"; do
       [[ "\$file" == *"\$pattern"* ]] && skip=1 && break
@@ -763,9 +767,38 @@ wt-sync-to-ref() {
     if [ "\$skip" -eq 0 ] && [ -e "\$file" ]; then
       mkdir -p "\$ref_dir/\$(dirname "\$file")"
       cp -r "\$file" "\$ref_dir/\$file"
+      synced_files+=("\$file")
       echo "Synced: \$file"
     fi
-  done
+  done <<< "\$file_list"
+
+  # Archive stale files (in .local-ref but no longer in worktree)
+  # To hard-delete instead of archiving: replace 'mkdir -p ... && mv' with 'rm'
+  local stale_count=0
+  while IFS= read -r ref_file; do
+    [ -z "\$ref_file" ] && continue
+    local rel_path="\${ref_file#\$ref_dir/}"
+    local is_synced=0
+    for sf in "\${synced_files[@]}"; do
+      if [ "\$sf" = "\$rel_path" ]; then
+        is_synced=1
+        break
+      fi
+    done
+    if [ "\$is_synced" -eq 0 ]; then
+      mkdir -p "\$archive_dir/\$(dirname "\$rel_path")"
+      mv "\$ref_file" "\$archive_dir/\$rel_path"
+      echo "Archived: \$rel_path"
+      ((stale_count++))
+    fi
+  done < <(find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" -type f 2>/dev/null)
+
+  # Clean up empty directories (excluding _archive)
+  find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" -type d -empty -delete 2>/dev/null
+
+  if [ "\$stale_count" -gt 0 ]; then
+    echo "Archived \$stale_count stale file(s) to _archive/"
+  fi
   echo "Sync to .local-ref complete"
 }
 
@@ -777,7 +810,7 @@ wt-sync-from-ref() {
     echo "No .local-ref directory found at \$bare_root"
     return 1
   fi
-  cp -r "\$ref_dir/." .
+  rsync -a --exclude='_archive/' "\$ref_dir/" .
   echo "Sync from .local-ref complete"
 }
 \`\`\`
