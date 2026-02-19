@@ -194,16 +194,22 @@ fi
 print_step 2 "Get local/ignored files"
 
 EXCLUDE_PATTERNS=(
-    "node_modules/"
-    ".next/"
-    "dist/"
-    "build/"
-    ".tsbuildinfo"
-    "next-env.d.ts"
-    ".cache/"
-    "coverage/"
-    ".vercel/"
-    ".DS_Store"
+    # Node.js / Next.js
+    "node_modules/" ".next/" "dist/" "build/" ".tsbuildinfo" "next-env.d.ts"
+    ".cache/" "coverage/" ".nyc_output/" ".vercel/" ".husky/_/"
+    # Python
+    ".venv/" "venv/" "__pycache__/" ".mypy_cache/" ".ruff_cache/"
+    ".pytest_cache/" ".hypothesis/" ".egg-info" "htmlcov/"
+    # Terraform / OpenTofu
+    ".terraform/" ".tfstate" "tfplan" "crash.log"
+    ".tofurc" ".terraformrc" "override.tf" "_override.tf"
+    # IDE (uncomment to exclude instead of syncing)
+    # ".vscode/" ".idea/"
+    ".swp" ".swo"
+    # Logs / temp
+    ".log" "logs/" ".tmp" ".temp"
+    # OS
+    ".DS_Store" "Thumbs.db"
 )
 
 echo "Finding user-specific local files..."
@@ -592,19 +598,16 @@ wt-rm-branch add-login
 - Use descriptive worktree names that match your branch names
 - Clean up merged worktrees to keep things organized
 
-## Keeping .local-ref/ Updated
+## Syncing .local-ref/
 
 When you update local config files in a worktree (e.g., add a new \`.env\` variable), sync them back to \`.local-ref/\` so new worktrees get the latest:
 
 \`\`\`bash
-# From any worktree
-wt-sync-ref
-\`\`\`
+# From any worktree: push local files to .local-ref/
+wt-sync-to-ref
 
-Or manually:
-\`\`\`bash
-# Sync from current worktree to .local-ref/
-cp .env.local ../.local-ref/
+# From any worktree: pull local files from .local-ref/
+wt-sync-from-ref
 \`\`\`
 
 ## Shell Functions (Optional)
@@ -640,7 +643,9 @@ wt-add() {
   fi
   local r=\$(_wt_root)
   local core=\${WT_CORE_BRANCH:-main}
-  if ! git --git-dir="\$r/.git" worktree add "\$r/worktrees/\$1" -b "\$1" "\$core"; then
+  echo "Fetching origin/\$core..."
+  git --git-dir="\$r/.git" fetch origin "\$core" 2>/dev/null || echo "Warning: could not fetch from origin"
+  if ! git --git-dir="\$r/.git" worktree add "\$r/worktrees/\$1" -b "\$1" "origin/\$core"; then
     echo "Failed to create worktree '\$1'"
     return 1
   fi
@@ -653,6 +658,8 @@ wt-add-existing() {
     return 1
   fi
   local r=\$(_wt_root)
+  echo "Fetching origin/\$1..."
+  git --git-dir="\$r/.git" fetch origin "\$1" 2>/dev/null || echo "Warning: could not fetch from origin"
   if ! git --git-dir="\$r/.git" worktree add "\$r/worktrees/\$1" "\$1"; then
     echo "Failed to create worktree '\$1'"
     return 1
@@ -684,7 +691,7 @@ wt-remove() {
     read -k 1 REPLY
     echo
     if [[ \$REPLY =~ ^[Yy]\$ ]]; then
-      (cd "\$wt_path" && wt-sync-ref)
+      (cd "\$wt_path" && wt-sync-to-ref)
     fi
   fi
   # If we are inside the worktree being removed, move to root first
@@ -715,19 +722,42 @@ wt-cd() {
 }
 wt-root() { cd "\$(_wt_root)"; }
 
-# Sync local files from current worktree back to .local-ref/
-wt-sync-ref() {
+# Shared exclude patterns for sync functions
+_wt_sync_excludes=(
+  # Node.js / Next.js
+  "node_modules/" ".next/" "dist/" "build/" ".tsbuildinfo" "next-env.d.ts"
+  ".cache/" "coverage/" ".nyc_output/" ".vercel/" ".husky/_/"
+  # Python
+  ".venv/" "venv/" "__pycache__/" ".mypy_cache/" ".ruff_cache/"
+  ".pytest_cache/" ".hypothesis/" ".egg-info" "htmlcov/"
+  # Terraform / OpenTofu
+  ".terraform/" ".tfstate" "tfplan" "crash.log"
+  ".tofurc" ".terraformrc" "override.tf" "_override.tf"
+  # IDE (uncomment to exclude instead of syncing)
+  # ".vscode/" ".idea/"
+  ".swp" ".swo"
+  # Logs / temp
+  ".log" "logs/" ".tmp" ".temp"
+  # OS
+  ".DS_Store" "Thumbs.db"
+)
+
+# Sync local files from current worktree to .local-ref/
+wt-sync-to-ref() {
   local bare_root=\$(_wt_root)
   local ref_dir="\$bare_root/.local-ref"
-  local exclude_patterns=("node_modules/" ".next/" "dist/" "build/" ".tsbuildinfo" "next-env.d.ts" ".cache/" "coverage/" ".vercel/" ".DS_Store")
   local file_list=\$(git ls-files --others --ignored --exclude-standard 2>/dev/null)
   if [ -z "\$file_list" ]; then
     echo "No ignored files found to sync"
     return 0
   fi
+  if [ ! -d "\$ref_dir" ]; then
+    mkdir -p "\$ref_dir"
+    echo "Created .local-ref/ at \$bare_root"
+  fi
   echo "\$file_list" | while read -r file; do
     local skip=0
-    for pattern in "\${exclude_patterns[@]}"; do
+    for pattern in "\${_wt_sync_excludes[@]}"; do
       [[ "\$file" == *"\$pattern"* ]] && skip=1 && break
     done
     if [ "\$skip" -eq 0 ] && [ -e "\$file" ]; then
@@ -736,7 +766,19 @@ wt-sync-ref() {
       echo "Synced: \$file"
     fi
   done
-  echo "Sync complete"
+  echo "Sync to .local-ref complete"
+}
+
+# Sync local files from .local-ref/ to current worktree
+wt-sync-from-ref() {
+  local bare_root=\$(_wt_root)
+  local ref_dir="\$bare_root/.local-ref"
+  if [ ! -d "\$ref_dir" ]; then
+    echo "No .local-ref directory found at \$bare_root"
+    return 1
+  fi
+  cp -r "\$ref_dir/." .
+  echo "Sync from .local-ref complete"
 }
 \`\`\`
 
@@ -745,7 +787,8 @@ Usage:
 wt-list                    # List all worktrees
 wt-add feature-x           # Create branch from $CORE_BRANCH, copy local files, cd into worktree
 wt-add-existing staging    # Create worktree from existing branch, copy local files, cd into it
-wt-sync-ref                # Sync local files from current worktree to .local-ref/
+wt-sync-to-ref             # Sync local files from current worktree to .local-ref/
+wt-sync-from-ref           # Copy local files from .local-ref/ to current worktree
 wt-remove feature-x        # Remove worktree (offers to sync local files first; safe from inside)
 wt-remove --force feature-x # Remove worktree without prompts (force-removes dirty worktrees)
 wt-rm-branch feature-x     # Delete a branch (after removing worktree)
