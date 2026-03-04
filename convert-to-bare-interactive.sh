@@ -668,16 +668,18 @@ wt-add-existing() {
   cd "\$r/worktrees/\$1" && git branch --set-upstream-to="origin/\$1" "\$1"
 }
 wt-remove() {
-  local force=0
+  local force=0 sync_mode=""
   local name=""
   for arg in "\$@"; do
     case "\$arg" in
       --force|-f) force=1 ;;
+      --sync|-s) sync_mode="yes" ;;
+      --no-sync|-n) sync_mode="no" ;;
       *) name="\$arg" ;;
     esac
   done
   if [ -z "\$name" ]; then
-    echo "Usage: wt-remove [--force] <worktree-name>"
+    echo "Usage: wt-remove [--force] [--sync|--no-sync] <worktree-name>"
     return 1
   fi
   local r=\$(_wt_root)
@@ -686,7 +688,10 @@ wt-remove() {
     echo "Worktree '\$name' not found at \$wt_path"
     return 1
   fi
-  if [ "\$force" -eq 0 ]; then
+  # Sync behavior: --sync always syncs, --no-sync skips, default prompts (unless --force)
+  if [ "\$sync_mode" = "yes" ]; then
+    (cd "\$wt_path" && wt-sync-to-ref)
+  elif [ -z "\$sync_mode" ] && [ "\$force" -eq 0 ]; then
     echo -n "Sync local files from '\$name' to .local-ref before removing? (y/n): "
     read -k 1 REPLY
     echo
@@ -822,8 +827,10 @@ wt-add feature-x           # Create branch from $CORE_BRANCH, copy local files, 
 wt-add-existing staging    # Create worktree from existing branch, copy local files, cd into it
 wt-sync-to-ref             # Sync local files from current worktree to .local-ref/
 wt-sync-from-ref           # Copy local files from .local-ref/ to current worktree
-wt-remove feature-x        # Remove worktree (offers to sync local files first; safe from inside)
-wt-remove --force feature-x # Remove worktree without prompts (force-removes dirty worktrees)
+wt-remove feature-x           # Remove worktree (prompts to sync local files first; safe from inside)
+wt-remove --sync feature-x    # Remove worktree, sync local files first (no prompt)
+wt-remove --no-sync feature-x # Remove worktree, skip sync (no prompt)
+wt-remove --force feature-x   # Force-remove worktree without prompts (for dirty worktrees)
 wt-rm-branch feature-x     # Delete a branch (after removing worktree)
 wt-cd $CORE_BRANCH                 # Go to specific worktree
 wt-root                    # Go to bare repo root
@@ -832,6 +839,229 @@ wt-root                    # Go to bare repo root
 **Environment:** Set \`WT_CORE_BRANCH\` to your core branch (defaults to \`main\`).
 
 Note: Functions work from bare repo root or any worktree.
+
+## Agent / Sandbox Compatibility (Optional)
+
+Shell functions defined in \`.zshrc\` only exist in interactive shells that source
+it. Agents, sandboxes, cron jobs, and other non-interactive contexts cannot call
+them. If you use tools like Claude Code or other AI agents that operate in
+sandboxed shells, you can extract the logic into standalone scripts on your PATH.
+
+### How to set it up
+
+1. Create standalone scripts in \`~/.local/bin/\` (or anywhere on your PATH).
+   Each script contains the logic from the corresponding shell function but uses
+   \`exit\` instead of \`return\` and sends status messages to stderr (\`>&2\`).
+   \`wt-add\` and \`wt-add-existing\` print only the worktree path to stdout so
+   callers can capture it.
+
+   Scripts to create (10 total):
+
+   **\`_wt_root\`** -- resolves the bare repo root path:
+   \`\`\`bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   git_dir=\$(git rev-parse --git-common-dir 2>/dev/null) || {
+     echo "Error: not inside a git repository" >&2; exit 1
+   }
+   if [ "\$git_dir" = ".git" ]; then pwd
+   else echo "\$git_dir" | sed 's|/\\.git\$||'
+   fi
+   \`\`\`
+
+   **\`wt-list\`**:
+   \`\`\`bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   git --git-dir="\$(_wt_root)/.git" worktree list
+   \`\`\`
+
+   **\`wt-add\`** -- creates a worktree for a new branch:
+   \`\`\`bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   if [ -z "\${1:-}" ]; then echo "Usage: wt-add <branch-name>" >&2; exit 1; fi
+   r=\$(_wt_root)
+   core=\${WT_CORE_BRANCH:-$CORE_BRANCH}
+   echo "Fetching origin/\$core..." >&2
+   git --git-dir="\$r/.git" fetch origin "\$core" 2>/dev/null || echo "Warning: could not fetch from origin" >&2
+   if ! git --git-dir="\$r/.git" worktree add "\$r/worktrees/\$1" -b "\$1" "origin/\$core" >&2; then
+     echo "Failed to create worktree '\$1'" >&2; exit 1
+   fi
+   [ -d "\$r/.local-ref" ] && rsync -a --exclude='_archive/' "\$r/.local-ref/" "\$r/worktrees/\$1/" >&2
+   echo "\$r/worktrees/\$1"
+   \`\`\`
+
+   **\`wt-add-existing\`** -- creates a worktree from an existing branch:
+   \`\`\`bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   if [ -z "\${1:-}" ]; then echo "Usage: wt-add-existing <branch-name>" >&2; exit 1; fi
+   r=\$(_wt_root)
+   echo "Fetching origin/\$1..." >&2
+   git --git-dir="\$r/.git" fetch origin "\$1" 2>/dev/null || echo "Warning: could not fetch from origin" >&2
+   if ! git --git-dir="\$r/.git" worktree add "\$r/worktrees/\$1" "\$1" >&2; then
+     echo "Failed to create worktree '\$1'" >&2; exit 1
+   fi
+   [ -d "\$r/.local-ref" ] && rsync -a --exclude='_archive/' "\$r/.local-ref/" "\$r/worktrees/\$1/" >&2
+   (cd "\$r/worktrees/\$1" && git branch --set-upstream-to="origin/\$1" "\$1" >&2)
+   echo "\$r/worktrees/\$1"
+   \`\`\`
+
+   **\`wt-remove\`** -- removes a worktree with sync/force flags:
+   \`\`\`bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   force=0; sync_mode=""; name=""
+   for arg in "\$@"; do
+     case "\$arg" in
+       --force|-f) force=1 ;; --sync|-s) sync_mode="yes" ;;
+       --no-sync|-n) sync_mode="no" ;; *) name="\$arg" ;;
+     esac
+   done
+   if [ -z "\$name" ]; then
+     echo "Usage: wt-remove [--force] [--sync|--no-sync] <worktree-name>" >&2; exit 1
+   fi
+   r=\$(_wt_root); wt_path="\$r/worktrees/\$name"
+   if [ ! -d "\$wt_path" ]; then echo "Worktree '\$name' not found at \$wt_path" >&2; exit 1; fi
+   if [ "\$sync_mode" = "yes" ]; then
+     (cd "\$wt_path" && wt-sync-to-ref)
+   elif [ -z "\$sync_mode" ] && [ "\$force" -eq 0 ]; then
+     echo -n "Sync local files from '\$name' to .local-ref before removing? (y/n): "
+     read -n 1 REPLY; echo
+     if [[ \$REPLY =~ ^[Yy]\$ ]]; then (cd "\$wt_path" && wt-sync-to-ref); fi
+   fi
+   case "\$(pwd -P)/" in
+     "\$(cd "\$wt_path" && pwd -P)/"*) cd "\$r" ;;
+   esac
+   if [ "\$force" -eq 1 ]; then
+     git --git-dir="\$r/.git" worktree remove --force "\$wt_path"
+   else
+     git --git-dir="\$r/.git" worktree remove "\$wt_path"
+   fi
+   \`\`\`
+
+   **\`wt-rm-branch\`** -- deletes a branch after worktree removal:
+   \`\`\`bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   if [ -z "\${1:-}" ]; then echo "Usage: wt-rm-branch <branch-name>" >&2; exit 1; fi
+   git --git-dir="\$(_wt_root)/.git" branch -d "\$1"
+   \`\`\`
+
+   **\`wt-cd\`** -- prints the path to a worktree:
+   \`\`\`bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   if [ -z "\${1:-}" ]; then echo "Usage: wt-cd <worktree-name>" >&2; exit 1; fi
+   r=\$(_wt_root); path="\$r/worktrees/\$1"
+   if [ ! -d "\$path" ]; then echo "Worktree '\$1' not found at \$path" >&2; exit 1; fi
+   echo "\$path"
+   \`\`\`
+
+   **\`wt-root\`** -- prints the bare repo root path:
+   \`\`\`bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   _wt_root
+   \`\`\`
+
+   **\`wt-sync-to-ref\`** -- syncs local files from worktree to .local-ref/:
+   \`\`\`bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   _wt_sync_excludes=(
+     "node_modules/" ".next/" "dist/" "build/" ".tsbuildinfo" "next-env.d.ts"
+     ".cache/" "coverage/" ".nyc_output/" ".vercel/" ".husky/_/"
+     ".venv/" "venv/" "__pycache__/" ".mypy_cache/" ".ruff_cache/"
+     ".pytest_cache/" ".hypothesis/" ".egg-info" "htmlcov/"
+     ".terraform/" ".tfstate" "tfplan" "crash.log"
+     ".tofurc" ".terraformrc" "override.tf" "_override.tf"
+     ".swp" ".swo" ".log" "logs/" ".tmp" ".temp"
+     ".DS_Store" "Thumbs.db"
+   )
+   bare_root=\$(_wt_root)
+   ref_dir="\$bare_root/.local-ref"
+   archive_dir="\$ref_dir/_archive"
+   file_list=\$(git ls-files --others --ignored --exclude-standard 2>/dev/null || true)
+   if [ -z "\$file_list" ]; then echo "No ignored files found to sync" >&2; exit 0; fi
+   [ ! -d "\$ref_dir" ] && mkdir -p "\$ref_dir" && echo "Created .local-ref/ at \$bare_root" >&2
+   synced_files=()
+   while IFS= read -r file; do
+     skip=0
+     for pattern in "\${_wt_sync_excludes[@]}"; do
+       [[ "\$file" == *"\$pattern"* ]] && skip=1 && break
+     done
+     if [ "\$skip" -eq 0 ] && [ -e "\$file" ]; then
+       mkdir -p "\$ref_dir/\$(dirname "\$file")"
+       cp -r "\$file" "\$ref_dir/\$file"
+       synced_files+=("\$file")
+       echo "Synced: \$file" >&2
+     fi
+   done <<< "\$file_list"
+   stale_count=0
+   while IFS= read -r ref_file; do
+     [ -z "\$ref_file" ] && continue
+     rel_path="\${ref_file#\$ref_dir/}"; is_synced=0
+     for sf in "\${synced_files[@]}"; do
+       [ "\$sf" = "\$rel_path" ] && is_synced=1 && break
+     done
+     if [ "\$is_synced" -eq 0 ]; then
+       mkdir -p "\$archive_dir/\$(dirname "\$rel_path")"
+       mv "\$ref_file" "\$archive_dir/\$rel_path"
+       echo "Archived: \$rel_path" >&2
+       ((stale_count++)) || true
+     fi
+   done < <(find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" -type f 2>/dev/null)
+   find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" -type d -empty -delete 2>/dev/null || true
+   [ "\$stale_count" -gt 0 ] && echo "Archived \$stale_count stale file(s) to _archive/" >&2
+   echo "Sync to .local-ref complete" >&2
+   \`\`\`
+
+   **\`wt-sync-from-ref\`** -- copies local files from .local-ref/ to current worktree:
+   \`\`\`bash
+   #!/usr/bin/env bash
+   set -euo pipefail
+   bare_root=\$(_wt_root)
+   ref_dir="\$bare_root/.local-ref"
+   if [ ! -d "\$ref_dir" ]; then echo "No .local-ref directory found at \$bare_root" >&2; exit 1; fi
+   rsync -a --exclude='_archive/' "\$ref_dir/" .
+   echo "Sync from .local-ref complete" >&2
+   \`\`\`
+
+2. Make them executable: \`chmod +x ~/.local/bin/wt-*\`
+
+3. Ensure \`~/.local/bin\` is on your PATH:
+   \`\`\`bash
+   export PATH="\$HOME/.local/bin:\$PATH"
+   \`\`\`
+
+4. Replace the full shell functions in \`.zshrc\` with thin wrappers that
+   delegate to the scripts via \`command\` (which bypasses shell functions and
+   finds the PATH executable) and add \`cd\` behavior:
+
+   \`\`\`bash
+   export WT_CORE_BRANCH="\${WT_CORE_BRANCH:-$CORE_BRANCH}"
+
+   wt-list()         { command wt-list; }
+   wt-add()          { local p; p=\$(command wt-add "\$@") && cd "\$p"; }
+   wt-add-existing() { local p; p=\$(command wt-add-existing "\$@") && cd "\$p"; }
+   wt-remove()       { local r; r=\$(command _wt_root 2>/dev/null); command wt-remove "\$@"; if [ ! -d "\$(pwd -P 2>/dev/null)" ]; then cd "\${r:-.}"; fi; }
+   wt-rm-branch()    { command wt-rm-branch "\$@"; }
+   wt-cd()           { cd "\$(command wt-cd "\$@")"; }
+   wt-root()         { cd "\$(command wt-root)"; }
+   wt-sync-to-ref()  { command wt-sync-to-ref; }
+   wt-sync-from-ref(){ command wt-sync-from-ref; }
+   \`\`\`
+
+### Why this works
+
+- Interactive shells source \`.zshrc\`, find the thin wrappers (shell functions),
+  which call \`command wt-add\` to run the PATH script, then \`cd\` into the result.
+- Non-interactive contexts (agents, sandboxes) skip \`.zshrc\` but find the
+  scripts directly on PATH.
+- Both layers share the same logic. The wrappers only add \`cd\` behavior, which
+  cannot persist in a script context anyway.
 WORKTREES_EOF
         
         print_success "WORKTREES.md created"
