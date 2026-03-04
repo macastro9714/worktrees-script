@@ -50,6 +50,7 @@ The script performs the following steps:
 ### Core Branch Selection
 
 In interactive mode, the script prompts you to select the primary branch:
+
 - `main`
 - `master`
 - Custom branch name
@@ -97,17 +98,20 @@ The script generates a `WORKTREES.md` file with shell functions for convenient w
 
 ### Shell Functions
 
-| Function                | Description                                                          |
-| ----------------------- | -------------------------------------------------------------------- |
-| `wt-list`               | List all worktrees                                                   |
-| `wt-add <name>`         | Create new branch from core, copy `.local-ref`, and cd into worktree |
-| `wt-add-existing <name>`| Create worktree from existing branch, copy `.local-ref`, cd into it  |
-| `wt-remove <name>`      | Remove worktree (prompts to sync local files first)                  |
-| `wt-remove --force <n>` | Force remove without prompts (handles dirty worktrees)               |
-| `wt-rm-branch <name>`   | Delete a branch (after removing worktree)                            |
-| `wt-cd <name>`          | Navigate to a specific worktree                                      |
-| `wt-root`               | Navigate to bare repo root                                           |
-| `wt-sync-ref`           | Sync local files from current worktree to `.local-ref/`              |
+| Function                  | Description                                                          |
+| ------------------------- | -------------------------------------------------------------------- |
+| `wt-list`                 | List all worktrees                                                   |
+| `wt-add <name>`           | Create new branch from core, copy `.local-ref`, and cd into worktree |
+| `wt-add-existing <name>`  | Create worktree from existing branch, copy `.local-ref`, cd into it  |
+| `wt-remove <name>`        | Remove worktree (prompts to sync local files first)                  |
+| `wt-remove --sync <name>` | Remove worktree, sync local files first (no prompt)                  |
+| `wt-remove --no-sync <n>` | Remove worktree, skip sync (no prompt)                               |
+| `wt-remove --force <n>`   | Force remove without prompts (handles dirty worktrees)               |
+| `wt-rm-branch <name>`     | Delete a branch (after removing worktree)                            |
+| `wt-cd <name>`            | Navigate to a specific worktree                                      |
+| `wt-root`                 | Navigate to bare repo root                                           |
+| `wt-sync-to-ref`          | Sync local files from current worktree to `.local-ref/`              |
+| `wt-sync-from-ref`        | Copy local files from `.local-ref/` to current worktree              |
 
 ### Environment Variable
 
