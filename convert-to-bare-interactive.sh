@@ -723,7 +723,12 @@ wt-cd() {
     echo "Usage: wt-cd <worktree-name>"
     return 1
   fi
-  cd "\$(_wt_root)/worktrees/\$1"
+  local path="\$(_wt_root)/worktrees/\$1"
+  if [ ! -d "\$path" ]; then
+    echo "Worktree '\$1' not found at \$path"
+    return 1
+  fi
+  cd "\$path"
 }
 wt-root() { cd "\$(_wt_root)"; }
 
@@ -753,29 +758,28 @@ wt-sync-to-ref() {
   local ref_dir="\$bare_root/.local-ref"
   local archive_dir="\$ref_dir/_archive"
   local file_list=\$(git ls-files --others --ignored --exclude-standard 2>/dev/null)
-  if [ -z "\$file_list" ]; then
+  if [ ! -d "\$ref_dir" ] && [ -z "\$file_list" ]; then
     echo "No ignored files found to sync"
     return 0
   fi
-  if [ ! -d "\$ref_dir" ]; then
-    mkdir -p "\$ref_dir"
-    echo "Created .local-ref/ at \$bare_root"
-  fi
+  [ ! -d "\$ref_dir" ] && mkdir -p "\$ref_dir" && echo "Created .local-ref/ at \$bare_root"
 
   # Sync files from worktree to .local-ref
   local synced_files=()
-  while IFS= read -r file; do
-    local skip=0
-    for pattern in "\${_wt_sync_excludes[@]}"; do
-      [[ "\$file" == *"\$pattern"* ]] && skip=1 && break
-    done
-    if [ "\$skip" -eq 0 ] && [ -e "\$file" ]; then
-      mkdir -p "\$ref_dir/\$(dirname "\$file")"
-      cp -r "\$file" "\$ref_dir/\$file"
-      synced_files+=("\$file")
-      echo "Synced: \$file"
-    fi
-  done <<< "\$file_list"
+  if [ -n "\$file_list" ]; then
+    while IFS= read -r file; do
+      local skip=0
+      for pattern in "\${_wt_sync_excludes[@]}"; do
+        [[ "\$file" == *"\$pattern"* ]] && skip=1 && break
+      done
+      if [ "\$skip" -eq 0 ] && [ -e "\$file" ]; then
+        mkdir -p "\$ref_dir/\$(dirname "\$file")"
+        cp -r "\$file" "\$ref_dir/\$file"
+        synced_files+=("\$file")
+        echo "Synced: \$file"
+      fi
+    done <<< "\$file_list"
+  fi
 
   # Archive stale files (in .local-ref but no longer in worktree)
   # To hard-delete instead of archiving: replace 'mkdir -p ... && mv' with 'rm'
@@ -784,7 +788,7 @@ wt-sync-to-ref() {
     [ -z "\$ref_file" ] && continue
     local rel_path="\${ref_file#\$ref_dir/}"
     local is_synced=0
-    for sf in "\${synced_files[@]}"; do
+    for sf in "\${synced_files[@]+"\${synced_files[@]}"}"; do
       if [ "\$sf" = "\$rel_path" ]; then
         is_synced=1
         break
@@ -794,12 +798,12 @@ wt-sync-to-ref() {
       mkdir -p "\$archive_dir/\$(dirname "\$rel_path")"
       mv "\$ref_file" "\$archive_dir/\$rel_path"
       echo "Archived: \$rel_path"
-      ((stale_count++))
+      ((stale_count++)) || true
     fi
-  done < <(find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" -type f 2>/dev/null)
+  done < <(find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" \( -type f -o -type l \) 2>/dev/null)
 
   # Clean up empty directories (excluding _archive)
-  find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" -type d -empty -delete 2>/dev/null
+  find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" -type d -empty -delete 2>/dev/null || true
 
   if [ "\$stale_count" -gt 0 ]; then
     echo "Archived \$stale_count stale file(s) to _archive/"
@@ -807,16 +811,37 @@ wt-sync-to-ref() {
   echo "Sync to .local-ref complete"
 }
 
-# Sync local files from .local-ref/ to current worktree
+# Restore ignored files from .local-ref/ to current worktree, archive stale files
 wt-sync-from-ref() {
   local bare_root=\$(_wt_root)
   local ref_dir="\$bare_root/.local-ref"
+  local archive_dir="\$ref_dir/_archive"
   if [ ! -d "\$ref_dir" ]; then
     echo "No .local-ref directory found at \$bare_root"
     return 1
   fi
-  rsync -a --exclude='_archive/' "\$ref_dir/" .
-  echo "Sync from .local-ref complete"
+  local restored=0 archived=0 skipped=0
+  while IFS= read -r ref_file; do
+    [ -z "\$ref_file" ] && continue
+    local rel_path="\${ref_file#\$ref_dir/}"
+    if git check-ignore -q "\$rel_path" 2>/dev/null; then
+      mkdir -p "\$(dirname "\$rel_path")"
+      cp -r "\$ref_file" "\$rel_path"
+      ((restored++)) || true
+    elif git ls-files --error-unmatch "\$rel_path" &>/dev/null; then
+      echo "Skipped (tracked): \$rel_path"
+      ((skipped++)) || true
+    else
+      mkdir -p "\$archive_dir/\$(dirname "\$rel_path")"
+      mv "\$ref_file" "\$archive_dir/\$rel_path"
+      echo "Archived (not ignored): \$rel_path"
+      ((archived++)) || true
+    fi
+  done < <(find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" \( -type f -o -type l \) 2>/dev/null)
+  find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" -type d -empty -delete 2>/dev/null || true
+  if [ "\$archived" -gt 0 ]; then echo "Archived \$archived stale file(s) to _archive/"; fi
+  if [ "\$skipped" -gt 0 ]; then echo "Skipped \$skipped tracked file(s)"; fi
+  echo "Restored \$restored file(s) from .local-ref"
 }
 \`\`\`
 
@@ -984,26 +1009,28 @@ sandboxed shells, you can extract the logic into standalone scripts on your PATH
    ref_dir="\$bare_root/.local-ref"
    archive_dir="\$ref_dir/_archive"
    file_list=\$(git ls-files --others --ignored --exclude-standard 2>/dev/null || true)
-   if [ -z "\$file_list" ]; then echo "No ignored files found to sync" >&2; exit 0; fi
+   if [ ! -d "\$ref_dir" ] && [ -z "\$file_list" ]; then echo "No ignored files found to sync" >&2; exit 0; fi
    [ ! -d "\$ref_dir" ] && mkdir -p "\$ref_dir" && echo "Created .local-ref/ at \$bare_root" >&2
    synced_files=()
-   while IFS= read -r file; do
-     skip=0
-     for pattern in "\${_wt_sync_excludes[@]}"; do
-       [[ "\$file" == *"\$pattern"* ]] && skip=1 && break
-     done
-     if [ "\$skip" -eq 0 ] && [ -e "\$file" ]; then
-       mkdir -p "\$ref_dir/\$(dirname "\$file")"
-       cp -r "\$file" "\$ref_dir/\$file"
-       synced_files+=("\$file")
-       echo "Synced: \$file" >&2
-     fi
-   done <<< "\$file_list"
+   if [ -n "\$file_list" ]; then
+     while IFS= read -r file; do
+       skip=0
+       for pattern in "\${_wt_sync_excludes[@]}"; do
+         [[ "\$file" == *"\$pattern"* ]] && skip=1 && break
+       done
+       if [ "\$skip" -eq 0 ] && [ -e "\$file" ]; then
+         mkdir -p "\$ref_dir/\$(dirname "\$file")"
+         cp -r "\$file" "\$ref_dir/\$file"
+         synced_files+=("\$file")
+         echo "Synced: \$file" >&2
+       fi
+     done <<< "\$file_list"
+   fi
    stale_count=0
    while IFS= read -r ref_file; do
      [ -z "\$ref_file" ] && continue
      rel_path="\${ref_file#\$ref_dir/}"; is_synced=0
-     for sf in "\${synced_files[@]}"; do
+     for sf in "\${synced_files[@]+"\${synced_files[@]}"}"; do
        [ "\$sf" = "\$rel_path" ] && is_synced=1 && break
      done
      if [ "\$is_synced" -eq 0 ]; then
@@ -1012,21 +1039,42 @@ sandboxed shells, you can extract the logic into standalone scripts on your PATH
        echo "Archived: \$rel_path" >&2
        ((stale_count++)) || true
      fi
-   done < <(find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" -type f 2>/dev/null)
+   done < <(find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" \( -type f -o -type l \) 2>/dev/null)
    find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" -type d -empty -delete 2>/dev/null || true
    [ "\$stale_count" -gt 0 ] && echo "Archived \$stale_count stale file(s) to _archive/" >&2
    echo "Sync to .local-ref complete" >&2
    \`\`\`
 
-   **\`wt-sync-from-ref\`** -- copies local files from .local-ref/ to current worktree:
+   **\`wt-sync-from-ref\`** -- restores ignored files from .local-ref/ to current worktree, archives stale files:
    \`\`\`bash
    #!/usr/bin/env bash
    set -euo pipefail
    bare_root=\$(_wt_root)
    ref_dir="\$bare_root/.local-ref"
+   archive_dir="\$ref_dir/_archive"
    if [ ! -d "\$ref_dir" ]; then echo "No .local-ref directory found at \$bare_root" >&2; exit 1; fi
-   rsync -a --exclude='_archive/' "\$ref_dir/" .
-   echo "Sync from .local-ref complete" >&2
+   restored=0; archived=0; skipped=0
+   while IFS= read -r ref_file; do
+     [ -z "\$ref_file" ] && continue
+     rel_path="\${ref_file#\$ref_dir/}"
+     if git check-ignore -q "\$rel_path" 2>/dev/null; then
+       mkdir -p "\$(dirname "\$rel_path")"
+       cp -r "\$ref_file" "\$rel_path"
+       ((restored++)) || true
+     elif git ls-files --error-unmatch "\$rel_path" &>/dev/null; then
+       echo "Skipped (tracked): \$rel_path" >&2
+       ((skipped++)) || true
+     else
+       mkdir -p "\$archive_dir/\$(dirname "\$rel_path")"
+       mv "\$ref_file" "\$archive_dir/\$rel_path"
+       echo "Archived (not ignored): \$rel_path" >&2
+       ((archived++)) || true
+     fi
+   done < <(find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" \( -type f -o -type l \) 2>/dev/null)
+   find "\$ref_dir" -not -path "\$archive_dir/*" -not -path "\$archive_dir" -type d -empty -delete 2>/dev/null || true
+   if [ "\$archived" -gt 0 ]; then echo "Archived \$archived stale file(s) to _archive/" >&2; fi
+   if [ "\$skipped" -gt 0 ]; then echo "Skipped \$skipped tracked file(s)" >&2; fi
+   echo "Restored \$restored file(s) from .local-ref" >&2
    \`\`\`
 
 2. Make them executable: \`chmod +x ~/.local/bin/wt-*\`
